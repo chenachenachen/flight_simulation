@@ -406,7 +406,7 @@ void TrafficDisplayWidget::paintEvent(QPaintEvent *event) {
         if (cat == CAT_ROTORCRAFT) { intruderHasPriority = true; }
 
         // =========================================================
-        // 📺 4. 屏幕渲染投影控制（放宽“是否在屏幕内”的判定）
+        // 📺 4. 屏幕渲染投影控制（取消边缘截断）
         // =========================================================
         bool isOnScreen = false;
         double screenX = -9999, screenY = -9999;
@@ -414,13 +414,8 @@ void TrafficDisplayWidget::paintEvent(QPaintEvent *event) {
             screenX = centerX + (y3 / x3) * focalLengthX;
             screenY = centerY + (z3 / x3) * focalLengthY;
 
-            // 旧逻辑要求四周留 50px 安全框，目标稍微在外面就完全不画
-            // 现在只要在屏幕矩形附近就认为可见；若坐标超出则钳制到边缘，画成“贴边提示”
+            // 修复：取消边缘截断。如果超出屏幕，直接判定为不在屏幕内，交由 3D 罗盘显示
             if (screenX >= 0 && screenX <= w && screenY >= 0 && screenY <= h) {
-                isOnScreen = true;
-            } else {
-                screenX = std::min(std::max(screenX, 0.0), static_cast<double>(w));
-                screenY = std::min(std::max(screenY, 0.0), static_cast<double>(h));
                 isOnScreen = true;
             }
         }
@@ -436,8 +431,16 @@ void TrafficDisplayWidget::paintEvent(QPaintEvent *event) {
                  double dE_p = dE;
                  
                  if (dv_len > 0.1) {
-                     // 缩放比例使轨迹长度映射当前距离 (视觉上展现 D_CPA)
-                     double scaleTime = slantRange / dv_len; 
+                     // 🚨 修复 3D 隧道消失：防止投影点穿透摄像机导致 x3_p <= 0 而被裁剪
+                     double scaleTime = (t_CPA > 0 && t_CPA < 60) ? t_CPA : 30.0; 
+                     
+                     // 保证预测终点（隧道开口）始终在挡风玻璃前方至少 300 米处
+                     double maxTravel = slantRange - 300.0; 
+                     if (maxTravel < 0) maxTravel = 0;
+                     if (scaleTime * dv_len > maxTravel) {
+                         scaleTime = maxTravel / dv_len;
+                     }
+                     
                      dN_p = dN + dv_N * scaleTime;
                      dE_p = dE + dv_E * scaleTime;
                  }
