@@ -1,5 +1,5 @@
-# Flight Simulation Collision Alert System
-**(Joint-Simulation: X-Plane 12 + BlueSky + Qt Interface)**
+# Flight Simulation Collision Alert Test
+Joint-Simulation: X-Plane 12 + BlueSky + Qt Interface
 
 This project is an advanced, cross-platform joint-simulation environment. It connects **X-Plane 12** (physics & visuals), **BlueSky** (traffic scenario logic), and a **Qt-based HUD Overlay** (ecological interface for collision alerting). 
 
