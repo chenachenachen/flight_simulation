@@ -4,6 +4,7 @@
 #include <QObject>
 #include <QMap>
 #include <QString>
+#include <QStringList> // 🌟 新增：包含 QStringList 头文件
 #include <QDateTime>
 
 // =========================================================
@@ -76,6 +77,9 @@ public:
     
     // 清除飞机 (如果超时)
     void removeAircraft(const QString &callsign);
+
+    // 🌟🌟🌟 新增：批量对比并清理“幽灵飞机” (Ghost AI Cleanup) 🌟🌟🌟
+    void syncActiveAircrafts(const QStringList &activeCallsigns);
     
 signals:
     void aircraftUpdated(const QString &callsign);

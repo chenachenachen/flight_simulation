@@ -1,11 +1,39 @@
 #include "AircraftManager.h"
 #include <QDebug>
+#include <QTimer>
+#include <QDateTime>
 
 AircraftManager::AircraftManager(QObject *parent)
     : QObject(parent) {
     m_ownship.isOwnship = true;
     m_ownship.callsign = "OWN001";
     qDebug() << "AircraftManager: Initialized";
+
+    // 🌟🌟🌟 核心修复：自动垃圾回收器 (Garbage Collection) 🌟🌟🌟
+    // 每 500 毫秒巡检一次内存中的飞机列表
+    QTimer *gcTimer = new QTimer(this);
+    connect(gcTimer, &QTimer::timeout, this, [this]() {
+        qint64 now = QDateTime::currentMSecsSinceEpoch();
+        QStringList staleKeys;
+        
+        // 找出所有超时未更新的飞机（判定超时阈值为 1000 毫秒）
+        for (auto it = m_aircrafts.begin(); it != m_aircrafts.end(); ++it) {
+            if (!it.value().isOwnship && (now - it.value().lastUpdateMs > 1000)) {
+                staleKeys.append(it.key());
+            }
+        }
+        
+        // 如果发现了超时幽灵飞机，彻底清除它们
+        if (!staleKeys.isEmpty()) {
+            for (const QString &key : staleKeys) {
+                qDebug() << "AircraftManager: GC removed stale ghost aircraft ->" << key;
+                m_aircrafts.remove(key);
+            }
+            // 触发全局重绘，瞬间清空屏幕上的残留红框/黄线
+            emit aircraftUpdated(""); 
+        }
+    });
+    gcTimer->start(500);
 }
 
 AircraftData* AircraftManager::getOrCreateAircraft(const QString &callsign) {
@@ -13,6 +41,8 @@ AircraftData* AircraftManager::getOrCreateAircraft(const QString &callsign) {
         AircraftData newAircraft;
         newAircraft.callsign = callsign;
         newAircraft.isOwnship = false;
+        // 创建时赋予初始时间戳
+        newAircraft.lastUpdateMs = QDateTime::currentMSecsSinceEpoch(); 
         m_aircrafts[callsign] = newAircraft;
         emit newAircraftAdded(callsign);
     }
@@ -22,7 +52,6 @@ AircraftData* AircraftManager::getOrCreateAircraft(const QString &callsign) {
 void AircraftManager::updateAircraft(const QString &callsign, const AircraftData &data) {
     // 确保不是本机数据
     if (data.isOwnship) {
-        qDebug() << "AircraftManager: Skipping ownship in updateAircraft:" << callsign;
         return;
     }
     
@@ -30,9 +59,8 @@ void AircraftManager::updateAircraft(const QString &callsign, const AircraftData
     m_aircrafts[callsign] = data;
     m_aircrafts[callsign].isOwnship = false; // 确保标记正确
     
-    qDebug() << "AircraftManager: updateAircraft" << callsign 
-             << (isNew ? "(NEW)" : "(UPDATE)")
-             << "Total aircraft now:" << m_aircrafts.size();
+    // 🌟🌟🌟 关键步骤：每次收到该飞机的更新，刷新它的“存活时间戳”
+    m_aircrafts[callsign].lastUpdateMs = QDateTime::currentMSecsSinceEpoch();
     
     if (isNew) {
         emit newAircraftAdded(callsign);
@@ -78,6 +106,12 @@ void AircraftManager::updateOwnshipPosition(double lat, double lon, double alt,
 void AircraftManager::removeAircraft(const QString &callsign) {
     if (m_aircrafts.contains(callsign)) {
         m_aircrafts.remove(callsign);
+        qDebug() << "AircraftManager: Explicitly removed aircraft" << callsign;
     }
+}
+
+// 兼容之前加的函数，防止报错，但核心清理工作已经由定时器(GC)接管了
+void AircraftManager::syncActiveAircrafts(const QStringList &activeCallsigns) {
+    Q_UNUSED(activeCallsigns);
 }
 

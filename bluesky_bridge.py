@@ -29,7 +29,7 @@ except ImportError:
     sys.exit(1)
 
 # =========================================================================
-# ✈️ X-Plane AI 槽位配置表 (🚨 严格匹配你最新截图的顺序)
+# ✈️ X-Plane AI 槽位配置表
 # =========================================================================
 XP_SLOT_CONFIG = {
     "ROTOR": [1],          # 槽位 1: Sikorsky S-76C
@@ -48,14 +48,10 @@ class BlueSkyBridge:
         self.xp_client = xpc.XPlaneConnect()
         
         self.ai_mapping = {} 
-        # 使用深拷贝，防止污染原始配置
         self.slots_pool = copy.deepcopy(XP_SLOT_CONFIG)
         
         self.ownship_callsign = "OWN001"
-        self.scenario_created = False
-        self.last_spawn_check = 0
         self.last_ownship_alt_m = None
-        self.model_cache = {} 
         self.disable_autospawn = os.getenv("BS_DISABLE_AUTOSPAWN", "0") == "1"
         self.ownship_state = None  
         self.last_ownship_sync_state = None  
@@ -80,10 +76,6 @@ class BlueSkyBridge:
             self.client.subscribe(b'ACDATA', actonly=True)
         except: pass
 
-    def check_and_spawn_traffic(self):
-        if self.disable_autospawn: return
-        pass # 此处省略原 autospawn 逻辑
-
     def assign_slot(self, callsign, model):
         if callsign in self.ai_mapping:
             return self.ai_mapping[callsign]
@@ -92,19 +84,15 @@ class BlueSkyBridge:
         c = callsign.upper()
         needed_type = "DEFAULT"
         
-        # 🚨 双保险：同时识别机型和呼号
         if m.startswith("R44") or m.startswith("HELI") or "HELI" in c: needed_type = "ROTOR"
         elif m.startswith("MQ") or m.startswith("UAV") or "UAV" in c: needed_type = "UAV"
         elif m.startswith("B74") or m.startswith("A38") or m.startswith("A33") or m.startswith("HEAVY") or "HEAVY" in c: needed_type = "HEAVY"
             
         slot = -1
-        # 1. 优先拿匹配的专属槽位
         if len(self.slots_pool[needed_type]) > 0:
             slot = self.slots_pool[needed_type].pop(0)
-        # 2. 🚨 修复隐形 Bug：如果专属用完了，先去拿 DEFAULT (4,5,6)，绝对不能先去拿不存在的 EXTRA (7+)
         elif len(self.slots_pool["DEFAULT"]) > 0:
             slot = self.slots_pool["DEFAULT"].pop(0)
-        # 3. 实在没有了再去 EXTRA
         elif len(self.slots_pool["EXTRA"]) > 0:
             slot = self.slots_pool["EXTRA"].pop(0)
             
@@ -147,15 +135,13 @@ class BlueSkyBridge:
                     if isinstance(raw_model, bytes): model = raw_model.decode('utf-8', errors='ignore').strip()
                     else: model = str(raw_model).strip()
 
-                # 🚨 核心修复：应对 BlueSky 网络丢包，通过呼号强制反推模型！
-                # 这将直接决定 Qt 画什么符号，以及 X-Plane 选什么 3D 模型。
                 if not model or model == "B744":
                     c_up = cs.upper()
                     if "HELI" in c_up or "R44" in c_up: model = "R44"
                     elif "UAV" in c_up or "MQ" in c_up: model = "MQ9"
                     elif "HEAVY" in c_up: model = "B744"
                     elif "TFC" in c_up: model = "A320"
-                    else: model = "A320" # 兜底
+                    else: model = "A320"
 
                 self.assign_slot(cs, model)
 
@@ -174,10 +160,11 @@ class BlueSkyBridge:
                     'model': model
                 })
 
-        # 垃圾回收逻辑保持不变...
+        # 🌟 垃圾回收：如果飞机不在当前列表中，释放槽位并清除缓存
         dead_callsigns = [c for c in self.ai_mapping.keys() if c not in current_callsigns]
         for c in dead_callsigns:
             freed_slot = self.ai_mapping.pop(c)
+            self.last_sent_state.pop(c, None) # 清除旧飞机的平滑状态，防止再次生成时漂移
             for cat, slots_list in XP_SLOT_CONFIG.items():
                 if freed_slot in slots_list:
                     self.slots_pool[cat].append(freed_slot)
@@ -187,42 +174,6 @@ class BlueSkyBridge:
 
         return data
 
-    def sync_ownship_to_scene(self):
-        """将 X-Plane 自机位置/航向对齐到 BlueSky 场景中的 OWN001。
-
-        只在“明显换场景”时瞬移一次，避免每帧强行改姿态导致剧烈摇晃。
-        """
-        if not self.ownship_state:
-            return
-        try:
-            lat = self.ownship_state['lat']
-            lon = self.ownship_state['lon']
-            alt_m = self.ownship_state['alt_m']
-            hdg = self.ownship_state['hdg']
-
-            # 第一次看到 OWN001：一定对齐一次
-            if self.last_ownship_sync_state is None:
-                self.xp_client.sendPOSI([lat, lon, alt_m, 0, 0, hdg, 1.0], 0)
-                self.last_ownship_sync_state = dict(lat=lat, lon=lon, alt_m=alt_m, hdg=hdg)
-                return
-
-            # 之后只有在“变化很大”时才认为是切换了新场景，再对齐一次
-            prev = self.last_ownship_sync_state
-
-            # 估算水平位移（粗略）：1° ≈ 60 NM
-            dlat_deg = lat - prev['lat']
-            dlon_deg = lon - prev['lon']
-            approx_nm = math.sqrt(dlat_deg**2 + dlon_deg**2) * 60.0
-            dalt = abs(alt_m - prev['alt_m'])
-
-            # 阈值：水平位移 > 0.1 NM 或 高度差 > 50 ft，认为是“换场景”
-            # 普通飞行每帧位移远小于 0.1 NM，不会触发；IC 加载新场景时会触发一次
-            if approx_nm > 0.1 or dalt > 50.0:
-                self.xp_client.sendPOSI([lat, lon, alt_m, 0, 0, hdg, 1.0], 0)
-                self.last_ownship_sync_state = dict(lat=lat, lon=lon, alt_m=alt_m, hdg=hdg)
-        except Exception as e:
-            print(f"Ownship sync error: {e}")
-
     def update_xplane(self, traffic):
         if not self.xp_client: return
         
@@ -231,26 +182,25 @@ class BlueSkyBridge:
             self.xp_client.sendDREF("sim/operation/override/override_planepath", overrides)
         except: pass
         
+        active_slots = set() # 🌟 新增：记录当前帧正在活跃的槽位
+        
         for ac in traffic:
             cs = ac['callsign']
             if cs in self.ai_mapping:
                 slot = self.ai_mapping[cs]
+                active_slots.add(slot) # 标记为使用中
                 
-                # 目标位置（来自 BlueSky）
                 target_alt_m = ac['altitude'] / 3.28084
                 target_lat = ac['latitude']
                 target_lon = ac['longitude']
                 target_hdg = ac['heading']
 
-                # 上一次已发送的位置，用于平滑
                 prev = self.last_sent_state.get(cs)
                 if prev is not None:
                     dlat = target_lat - prev['lat']
                     dlon = target_lon - prev['lon']
                     dalt = target_alt_m - prev['alt_m']
 
-                    # 若场景刚切换或跳变很大（> ~3 NM），直接跳过去，避免慢慢飘过去
-                    # 1 deg ~ 60 NM，这里用 3 NM 阈值
                     deg_3nm = 3.0 / 60.0
                     if abs(dlat) > deg_3nm or abs(dlon) > deg_3nm:
                         smooth_lat = target_lat
@@ -266,7 +216,6 @@ class BlueSkyBridge:
                     smooth_lon = target_lon
                     smooth_alt_m = target_alt_m
 
-                # 记录本次发送，用于下一帧平滑
                 self.last_sent_state[cs] = {
                     'lat': smooth_lat,
                     'lon': smooth_lon,
@@ -279,6 +228,15 @@ class BlueSkyBridge:
                     0, 0, target_hdg, 1.0
                 ], slot)
 
+        # 🌟🌟🌟 新增核心逻辑：清理幽灵飞机 (Ghost AI Cleanup) 🌟🌟🌟
+        # 遍历 1~19 号槽位，凡是没被标记为活跃的，全部扔到南极地下
+        for s in range(1, 20):
+            if s not in active_slots:
+                try:
+                    self.xp_client.sendPOSI([-89.0, 0.0, -5000.0, 0, 0, 0, 0], s)
+                except:
+                    pass
+
     def run(self):
         print("Bridge Running (20Hz XP / 50Hz Qt)...")
         next_qt = time.time()
@@ -288,22 +246,18 @@ class BlueSkyBridge:
             now = time.time()
             self.read_ownship_from_xp()
 
-            # 获取 BlueSky 流量
             traffic = self.get_traffic_list()
-            # 场景加载后，将 X-Plane 自机对齐到 BlueSky 的 OWN001（一次性对齐）
-            # self.sync_ownship_to_scene()
             
             # 发送给 Qt (50Hz)
             if now >= next_qt:
-                if traffic:
-                    msg = {'type': 'aircraft_data', 'data': traffic}
-                    self.sock.sendto(json.dumps(msg).encode(), (self.qt_host, self.qt_port))
+                # 🌟 修复：即使 traffic 是空列表，也必须发送！这样 Qt 才知道天空中没飞机了。
+                msg = {'type': 'aircraft_data', 'data': traffic}
+                self.sock.sendto(json.dumps(msg).encode(), (self.qt_host, self.qt_port))
                 next_qt += 0.02
             
             # 发送给 X-Plane (20Hz)
             if now >= next_xp:
-                if traffic:
-                    self.update_xplane(traffic)
+                self.update_xplane(traffic) # 即使 traffic 是空列表，也会进入 update_xplane 触发全槽位清空
                 next_xp += 0.05
             
             time.sleep(0.001)
