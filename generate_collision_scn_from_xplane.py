@@ -61,7 +61,6 @@ def main():
 
             # 核心更新：实时读取本机的 真空速 (True Airspeed) 以消除物理速度差
             try:
-                # X-Plane true_airspeed 单位是 m/s，需要乘以 1.94384 转换为节 (knots)
                 tas_ms = client.getDREF("sim/flightmodel/position/true_airspeed")[0]
                 own_spd = max(tas_ms * 1.94384, 80.0)
             except:
@@ -74,82 +73,79 @@ def main():
                 return offset_lat_lon(base_lat, base_lon, dn, de)
 
             # =====================================================================
-            # 动态拦截数学引擎 (Dynamic Intercept Math)
-            # 无论你飞多快，保证目标机在恰好的时间点 (t_cpa) 擦过你指定的距离 (d_cpa)
-            # 并且保证目标机是从你的正前方风挡视野内切入的！
+            # 🌟 升级版：动态拦截数学引擎 (Explicit Relative Angle Control)
+            # 通过显式指定 rel_hdg_deg (相对航向差)，可以创造绝对正中心的对撞！
             # =====================================================================
-            def calc_intercept(target_spd, t_cpa_sec, d_cpa_nm, from_right=True, is_headon=False):
+            def calc_intercept(target_spd, t_cpa_sec, d_cpa_nm, rel_hdg_deg, cross_from_right=True):
                 T_hrs = t_cpa_sec / 3600.0
                 dist_own = own_spd * T_hrs
                 
                 # 计算相交点 (相对于当前本机的偏移)
                 cross_fwd = dist_own
-                cross_right = d_cpa_nm if from_right else -d_cpa_nm
+                cross_right = d_cpa_nm if cross_from_right else -d_cpa_nm
                 
-                # 设定切入角度：Warning 接近对头飞(175度)，Caution 斜前方切入(150度)
-                rel_hdg_deg = 175 if is_headon else 150
-                if not from_right: rel_hdg_deg = -rel_hdg_deg 
-                
+                # 目标机真实的航向 (本机航向 + 相对航向角)
                 tgt_true_hdg = (own_hdg + rel_hdg_deg) % 360
                 rel_hdg_rad = math.radians(rel_hdg_deg)
                 dist_tgt = target_spd * T_hrs
                 
-                # 反推目标机的出生点
+                # 反推目标机出生点
                 start_fwd = cross_fwd - dist_tgt * math.cos(rel_hdg_rad)
                 start_right = cross_right - dist_tgt * math.sin(rel_hdg_rad)
                 
                 lat, lon = get_pos(start_fwd, start_right)
                 return lat, lon, tgt_true_hdg
+
             # ==========================================
             # S1: Populated Airspace (Baseline - 全安全)
-            # 修复：将所有飞机收束到正前方的 60 度视场角 (FOV) 走廊内
-            # 期待画面：前挡风玻璃内出现多个青色框 (Cyan)，证明系统未产生视觉杂波
             # ==========================================
             t_s1 = [
-                # A320：正前方 4海里，稍微偏左 1海里，同速平行飞
                 {'callsign': 'TFC1',   'model': 'A320', 'lat': get_pos(4.0, -1.0)[0], 'lon': get_pos(4.0, -1.0)[1], 'hdg': own_hdg, 'spd': own_spd},
-                # B744：正前方 5海里，稍微偏右 1.5海里，同速平行飞
                 {'callsign': 'HEAVY2', 'model': 'B744', 'lat': get_pos(5.0, 1.5)[0],  'lon': get_pos(5.0, 1.5)[1],  'hdg': own_hdg, 'spd': own_spd},
-                # 直升机：正前方 2.5海里，稍微偏右 0.5海里，悬停在空中 (速度0)
-                {'callsign': 'HELI1',  'model': 'R44',  'lat': get_pos(2.5, 0.5)[0],  'lon': get_pos(2.5, 0.5)[1],  'hdg': own_hdg, 'spd': 0},
+                {'callsign': 'HELI1',  'model': 'R44',  'lat': get_pos(2.0, 1.0)[0],  'lon': get_pos(2.0, 1.0)[1],  'hdg': own_hdg, 'spd': own_spd},
             ]
             write_scn(scen_dir / "eval_S1_Baseline.scn", "S1 Populated Airspace", base_lat, base_lon, own_hdg, alt_ft, t_s1)
             
             # ==========================================
-            # S2: Target Isolation (Caution - 完美触发版)
-            # 动态计算：保证40秒后，精准在右侧 1.5海里处擦肩而过
+            # S2: Target Isolation (Caution)
+            # 修复：改为 160 度微小侧角斜劈，使其出生在视野偏右 6 度的地方 (绝对在屏幕内)
             # ==========================================
-            lat_c, lon_c, hdg_c = calc_intercept(target_spd=250, t_cpa_sec=40, d_cpa_nm=1.5, from_right=True, is_headon=False)
+            lat_c, lon_c, hdg_c = calc_intercept(target_spd=200, t_cpa_sec=40, d_cpa_nm=1.2, rel_hdg_deg=160, cross_from_right=True)
             t_s2 = [
-                {'callsign': 'TFC1',  'model': 'A320', 'lat': get_pos(1.5, -2.5)[0], 'lon': get_pos(1.5, -2.5)[1], 'hdg': own_hdg, 'spd': own_spd},
-                {'callsign': 'CONV1', 'model': 'B738', 'lat': lat_c, 'lon': lon_c, 'hdg': hdg_c, 'spd': 250}
+                # 背景飞机拉回屏幕内 (前4，左1)
+                {'callsign': 'TFC1',  'model': 'A320', 'lat': get_pos(4.0, -1.0)[0], 'lon': get_pos(4.0, -1.0)[1], 'hdg': own_hdg, 'spd': own_spd},
+                {'callsign': 'CONV1', 'model': 'B738', 'lat': lat_c, 'lon': lon_c, 'hdg': hdg_c, 'spd': 200}
             ]
             write_scn(scen_dir / "eval_S2_Caution.scn", "S2 Target Isolation", base_lat, base_lon, own_hdg, alt_ft, t_s2)
 
             # ==========================================
-            # S3: Priority Stress Test (Warning - 完美触发版)
-            # 动态计算：
-            # 1. 致命威胁 (Warning): 25秒后，偏离度仅 0.1海里，直冲面门 (触发红隧道)
-            # 2. 潜在威胁 (Caution): 50秒后，左侧 1.8海里擦过 (触发黄线)
+            # S3: Priority Stress Test (Warning) 
+            # 修复：将红色和黄色飞机都压缩到前风挡 20 度夹角以内！
             # ==========================================
-            lat_w, lon_w, hdg_w = calc_intercept(target_spd=300, t_cpa_sec=25, d_cpa_nm=0.1, from_right=False, is_headon=True)
-            lat_c2, lon_c2, hdg_c2 = calc_intercept(target_spd=250, t_cpa_sec=50, d_cpa_nm=1.8, from_right=True, is_headon=False)
+            # 1. 致命威胁 (Red): 绝对 180 度正对撞！居中。
+            lat_w, lon_w, hdg_w = calc_intercept(target_spd=300, t_cpa_sec=28, d_cpa_nm=0.0, rel_hdg_deg=180, cross_from_right=True)
+            
+            # 2. 潜在威胁 (Yellow): 改为从左侧以 -165 度切入 (避开中间的红隧道)
+            # 它会出生在偏左边 11 度的地方，非常安分地在屏幕左侧画出一条擦肩而过的黄线。
+            lat_c2, lon_c2, hdg_c2 = calc_intercept(target_spd=200, t_cpa_sec=45, d_cpa_nm=1.5, rel_hdg_deg=-165, cross_from_right=False)
+            
             t_s3 = [
-                {'callsign': 'TFC1',  'model': 'A320', 'lat': get_pos(2, -4)[0], 'lon': get_pos(2, -4)[1], 'hdg': own_hdg, 'spd': own_spd},
-                {'callsign': 'CONV1', 'model': 'B738', 'lat': lat_c2, 'lon': lon_c2, 'hdg': hdg_c2, 'spd': 250},
-                {'callsign': 'HDON1', 'model': 'A320', 'lat': lat_w,  'lon': lon_w,  'hdg': hdg_w,  'spd': 300}
+                # 背景飞机拉回右前方 (前4.5，右1.2)
+                {'callsign': 'TFC1',  'model': 'A320', 'lat': get_pos(4.5, 1.2)[0], 'lon': get_pos(4.5, 1.2)[1], 'hdg': own_hdg, 'spd': own_spd},
+                {'callsign': 'CONV1', 'model': 'B738', 'lat': lat_c2, 'lon': lon_c2, 'hdg': hdg_c2, 'spd': 200}, # 左侧黄飞机
+                {'callsign': 'HDON1', 'model': 'A320', 'lat': lat_w,  'lon': lon_w,  'hdg': hdg_w,  'spd': 300}  # 正中心红飞机
             ]
             write_scn(scen_dir / "eval_S3_Warning.scn", "S3 Priority Stress Test", base_lat, base_lon, own_hdg, alt_ft, t_s3)
 
             # ==========================================
             # S4: Proximity Override (Safety Fallback)
-            # 修复：将平行伴飞的飞机从 3点/9点钟方向移到前风挡 11点/1点钟方向
-            # 数学验证：前 0.3，侧 0.15 -> 绝对距离 0.33 NM < 0.5 NM 阈值
-            # 期待画面：正前方极近距离出现两个红色 Warning 框（无隧道），证明安全兜底生效
+            # 修复：拉长前方距离，大幅缩小侧向距离，将其“挤”回前风挡正中心
+            # 数学验证：前 0.4，侧 0.05 -> 绝对距离 0.403 NM < 0.5 NM (完美触发 Override)
+            # 视角验证：水平夹角仅 7.1 度 -> 绝对居中，任你怎么晃都不会跑出视野！
             # ==========================================
             t_s4 = [
-                {'callsign': 'UAV1', 'model': 'MQ9',  'lat': get_pos(0.3, 0.15)[0],  'lon': get_pos(0.3, 0.15)[1],  'hdg': own_hdg, 'spd': own_spd},
-                {'callsign': 'UAV2', 'model': 'MQ9',  'lat': get_pos(0.3, -0.15)[0], 'lon': get_pos(0.3, -0.15)[1], 'hdg': own_hdg, 'spd': own_spd}
+                {'callsign': 'UAV1', 'model': 'MQ9',  'lat': get_pos(0.4, 0.05)[0],  'lon': get_pos(0.4, 0.05)[1],  'hdg': own_hdg, 'spd': own_spd},
+                {'callsign': 'UAV2', 'model': 'MQ9',  'lat': get_pos(0.4, -0.05)[0], 'lon': get_pos(0.4, -0.05)[1], 'hdg': own_hdg, 'spd': own_spd}
             ]
             write_scn(scen_dir / "eval_S4_Override.scn", "S4 Proximity Override", base_lat, base_lon, own_hdg, alt_ft, t_s4)
 

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from posix import listdir
 import sys
 import json
 import socket
@@ -29,14 +30,14 @@ except ImportError:
     sys.exit(1)
 
 # =========================================================================
-# ✈️ X-Plane AI 槽位配置表
+#  X-Plane AI slots configuration
 # =========================================================================
 XP_SLOT_CONFIG = {
-    "ROTOR": [1],          # 槽位 1: Sikorsky S-76C
-    "UAV":   [2],          # 槽位 2: F-4 Phantom II
-    "HEAVY": [3],          # 槽位 3: Airbus A330-300
-    "DEFAULT": [4, 5, 6],  # 槽位 4, 5, 6: Boeing 737-800
-    "EXTRA": list(range(7, 20))
+    "ROTOR": [1, 2],          # 槽位 1, 2: Sikorsky S-76C
+    "UAV":   [3, 4],          # 槽位 3, 4: Cirrus Vision SF50 (小型替身)
+    "HEAVY": [5, 6],          # 槽位 5, 6: Airbus A330-300
+    "DEFAULT": [7, 8, 9, 10], # 槽位 7~10: Boeing 737-800
+    "EXTRA": list(range(11, 20)) # 槽位 11~19: B737-800 (溢出备用槽)
 }
 
 class BlueSkyBridge:
@@ -84,17 +85,24 @@ class BlueSkyBridge:
         c = callsign.upper()
         needed_type = "DEFAULT"
         
-        if m.startswith("R44") or m.startswith("HELI") or "HELI" in c: needed_type = "ROTOR"
-        elif m.startswith("MQ") or m.startswith("UAV") or "UAV" in c: needed_type = "UAV"
-        elif m.startswith("B74") or m.startswith("A38") or m.startswith("A33") or m.startswith("HEAVY") or "HEAVY" in c: needed_type = "HEAVY"
+        # 严格匹配类型，确保与生成脚本中的型号 (MQ9, R44, B744, A320) 对齐
+        if "R44" in m or "HELI" in m or "HELI" in c: 
+            needed_type = "ROTOR"
+        elif "MQ" in m or "UAV" in m or "UAV" in c: 
+            needed_type = "UAV"
+        elif "B74" in m or "A33" in m or "HEAVY" in m or "HEAVY" in c: 
+            needed_type = "HEAVY"
+        else:
+            needed_type = "DEFAULT" # A320, B738 等都在这里
             
         slot = -1
+        # 从对应的池子里拿槽位
         if len(self.slots_pool[needed_type]) > 0:
             slot = self.slots_pool[needed_type].pop(0)
         elif len(self.slots_pool["DEFAULT"]) > 0:
-            slot = self.slots_pool["DEFAULT"].pop(0)
+            slot = self.slots_pool["DEFAULT"].pop(0) # 降级：如果特定机型没了，给个普通客机
         elif len(self.slots_pool["EXTRA"]) > 0:
-            slot = self.slots_pool["EXTRA"].pop(0)
+            slot = self.slots_pool["EXTRA"].pop(0)   # 终极降级
             
         if slot != -1:
             self.ai_mapping[callsign] = slot
@@ -160,7 +168,7 @@ class BlueSkyBridge:
                     'model': model
                 })
 
-        # 🌟 垃圾回收：如果飞机不在当前列表中，释放槽位并清除缓存
+        # 垃圾回收：如果飞机不在当前列表中，释放槽位并清除缓存
         dead_callsigns = [c for c in self.ai_mapping.keys() if c not in current_callsigns]
         for c in dead_callsigns:
             freed_slot = self.ai_mapping.pop(c)
@@ -250,7 +258,7 @@ class BlueSkyBridge:
             
             # 发送给 Qt (50Hz)
             if now >= next_qt:
-                # 🌟 修复：即使 traffic 是空列表，也必须发送！这样 Qt 才知道天空中没飞机了。
+                # 即使 traffic 是空列表，也必须发送！这样 Qt 才知道天空中没飞机了。
                 msg = {'type': 'aircraft_data', 'data': traffic}
                 self.sock.sendto(json.dumps(msg).encode(), (self.qt_host, self.qt_port))
                 next_qt += 0.02
