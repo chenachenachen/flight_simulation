@@ -3,7 +3,7 @@ import struct
 import sys
 
 class XPlaneConnect:
-    def __init__(self, xpHost='127.0.0.1', xpPort=49009, port=0, timeout=100):
+    def __init__(self, xpHost='192.168.0.22', xpPort=49001, port=0, timeout=100):
         self.xpIp = xpHost
         self.xpPort = xpPort
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
