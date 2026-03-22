@@ -25,6 +25,7 @@ private:
     TrafficDisplayWidget *m_displayWidget;
     QTimer *m_keepOnTopTimer;                // 定时器：保持窗口置顶
     QPushButton *m_quitButton;               // 退出按钮（左下角）
+    QRect m_targetWallGeometry;              // 外接墙目标几何（虚拟桌面坐标）
     
     void setupUI();
     void connectSignals();
@@ -35,6 +36,7 @@ private:
     // 透明覆盖窗口设置
     void setupOverlayWindow();   // 配置窗口为透明覆盖模式
     void ensureOnTop();          // 确保窗口始终置顶
+    void applyWallGeometry();    // 将窗口放到外接拼接屏（合并除最左屏外的所有屏）
     
     // 退出控制
     void requestQuit();          // 请求退出程序（通过快捷键）
