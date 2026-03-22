@@ -2,6 +2,7 @@
 #include <QByteArray>
 #include <QDebug>
 #include <QHostAddress>
+#include <QString>
 #include <cstring> 
 
 XPlaneReceiver::XPlaneReceiver(AircraftManager *manager, QObject *parent)
@@ -9,8 +10,8 @@ XPlaneReceiver::XPlaneReceiver(AircraftManager *manager, QObject *parent)
       m_socket(new QUdpSocket(this)),
       m_pollTimer(new QTimer(this)),
       m_manager(manager),
-      m_xpcPort(49009),
-      m_xpcHost(QHostAddress::LocalHost),
+      m_xpcPort(49001),
+      m_xpcHost(QHostAddress(QStringLiteral("192.168.0.22"))),
       m_isConnected(false),
       m_missedPackets(0) { // 初始化丢包计数器
       
@@ -256,4 +257,3 @@ void XPlaneReceiver::sendConnHandshake() {
 void XPlaneReceiver::onError(QAbstractSocket::SocketError error) {
     // 仅记录日志，不立即断开，依靠超时逻辑处理断开
     qDebug() << "XPlaneReceiver Socket Error:" << error;
-}
