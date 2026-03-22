@@ -23,8 +23,8 @@ class XPlaneReceiver : public QObject {
 public:
     explicit XPlaneReceiver(AircraftManager *manager, QObject *parent = nullptr);
     
-    // 连接 XPlaneConnect 插件（默认端口 49009）
-    bool startListening(int port = 49009);
+    // 连接 XPlaneConnect 插件（与模拟器网络配置一致：192.168.0.22:49001）
+    bool startListening(int port = 49001);
     
     // 停止监听
     void stopListening();
