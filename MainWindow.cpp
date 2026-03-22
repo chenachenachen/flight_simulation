@@ -5,7 +5,9 @@
 #include <QLabel>
 #include <QHBoxLayout>
 #include <QScreen>
+#include <QGuiApplication>
 #include <QApplication>
+#include <algorithm>
 #include <QShowEvent>
 #include <QHideEvent>
 #include <QCloseEvent>
@@ -21,6 +23,38 @@
 #include <objc/message.h>
 #include <objc/runtime.h>
 #endif
+
+namespace {
+
+/**
+ * 与 Immersive Display 等多横排显示器一致：最左为主控屏，其余屏合并为一块大矩形。
+ * 使用 Qt 虚拟桌面坐标，避免 main.cpp 里写死 1920 与 DPI 不一致。
+ */
+static QRect computeRightWallGeometry()
+{
+    const QList<QScreen *> screens = QGuiApplication::screens();
+    if (screens.isEmpty())
+        return QRect(1920, 0, 1920 * 3, 1080);
+
+    QList<QScreen *> sorted = screens;
+    std::sort(sorted.begin(), sorted.end(), [](const QScreen *a, const QScreen *b) {
+        const int la = a->geometry().left();
+        const int lb = b->geometry().left();
+        if (la != lb)
+            return la < lb;
+        return a->geometry().top() < b->geometry().top();
+    });
+
+    if (sorted.size() == 1)
+        return sorted.first()->geometry();
+
+    QRect u;
+    for (int i = 1; i < sorted.size(); ++i)
+        u = u.united(sorted[i]->geometry());
+    return u;
+}
+
+} // namespace
 
 // ==========================================
 // 构造 / 析构
@@ -42,8 +76,8 @@ MainWindow::MainWindow(QWidget *parent)
     setupUI();
     connectSignals();
 
-    // 连接 XPlaneConnect 插件（XPC，默认端口 49009）
-    m_xplaneReceiver->startListening(49009);
+    // 连接 XPlaneConnect 插件（与模拟器一致：192.168.0.22:49001）
+    m_xplaneReceiver->startListening(49001);
     // 连接到BlueSky bridge（接收traffic数据）
     // Bridge发送traffic数据到49004端口（避免与command port 49003冲突）
     // Bridge的command port是49003（接收ownship），qt_port是49004（发送traffic）
@@ -95,14 +129,9 @@ void MainWindow::setupOverlayWindow() {
     // 3. 隐藏状态栏（避免占用空间导致偏移）
     statusBar()->hide();
     
-    // 4. 满屏显示（透明覆盖层）- 确保从(0,0)开始
-    QScreen *screen = QApplication::primaryScreen();
-    if (screen) {
-        QRect screenGeometry = screen->geometry();
-        setGeometry(0, 0, screenGeometry.width(), screenGeometry.height());
-    } else {
-        setGeometry(0, 0, 1920, 1080);
-    }
+    // 4. 外接拼接墙：合并除最左屏外的所有显示器（勿用 primaryScreen 铺满主屏，会盖住 main.cpp 的 setGeometry）
+    m_targetWallGeometry = computeRightWallGeometry();
+    setGeometry(m_targetWallGeometry);
     
     // 4. 样式表确保透明
     setStyleSheet("QMainWindow { background: transparent; }");
@@ -200,6 +229,12 @@ void MainWindow::setupOverlayWindow() {
 #endif
 }
 
+void MainWindow::applyWallGeometry()
+{
+    if (m_targetWallGeometry.isValid())
+        setGeometry(m_targetWallGeometry);
+}
+
 // ==========================================
 // 置顶维护
 // ==========================================
@@ -239,6 +274,7 @@ void MainWindow::ensureOnTop() {
         flags |= Qt::WindowStaysOnTopHint;
         setWindowFlags(flags);
         show();
+        applyWallGeometry(); // Windows 上 setWindowFlags 会重建窗口，几何会丢
     }
     
     // 只在窗口状态变化时输出调试信息（减少日志噪音）
@@ -389,6 +425,11 @@ void MainWindow::onXPlaneDataReceived() {
 // ==========================================
 void MainWindow::showEvent(QShowEvent *event) {
     QMainWindow::showEvent(event);
+    applyWallGeometry();
+#ifdef Q_OS_WIN
+    // 部分 Windows 驱动/多 GPU 在首次 show 后才给出最终虚拟桌面坐标
+    QTimer::singleShot(0, this, [this]() { applyWallGeometry(); });
+#endif
     // 确保窗口显示并置顶，但不改变焦点
     ensureOnTop();
     // 关键：不使用raise()，避免改变焦点
