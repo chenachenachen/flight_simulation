@@ -3,41 +3,46 @@
 
 #include <QWidget>
 #include <QTimer>
-#include "AircraftManager.h"
+#include <QUdpSocket>
+#include "AircraftManager.h" // 假设你原本的包含文件是这个
+
+// =========================================================
+// 界面模式枚举
+// =========================================================
+enum InterfaceMode {
+    MODE_BASELINE_A = 1,        // 界面 A: 传统 2D 框，无预测
+    MODE_PROPOSED_B_GLOW = 2,   // 界面 B (设计 1): 光晕核心 3D 隧道
+    MODE_PROPOSED_B_RIBBED = 3  // 界面 B (设计 2): 半透明渐变带骨架 3D 隧道
+};
 
 class TrafficDisplayWidget : public QWidget {
     Q_OBJECT
-    
+
 public:
     explicit TrafficDisplayWidget(AircraftManager *manager, QWidget *parent = nullptr);
-    
+    ~TrafficDisplayWidget() = default;
+
 protected:
     void paintEvent(QPaintEvent *event) override;
-    void mousePressEvent(QMouseEvent *event) override;
-    void mouseMoveEvent(QMouseEvent *event) override;
-    void keyPressEvent(QKeyEvent *event) override;
-    
+    void keyPressEvent(QKeyEvent *e) override;
+    void mousePressEvent(QMouseEvent *e) override;
+    void mouseMoveEvent(QMouseEvent *e) override;
+
 private slots:
-    void onAircraftUpdated(const QString &callsign);
-    void onOwnshipUpdated();
     void onRefreshTimer();
+    void onAircraftUpdated(const QString &id);
+    void onOwnshipUpdated();
     
+    // 专门用于接收 Python 遥控器 UDP 指令的槽函数
+    void onCommandReceived();
+
 private:
     AircraftManager *m_manager;
     QTimer *m_refreshTimer;
     
-    // 绘制函数
-    void drawBackground(QPainter &painter);
-    void drawAircrafts(QPainter &painter);  // 绘制BlueSky交通飞机（红色方框）
-    // drawOwnship 已移除 - 本机由X-Plane界面显示
-    void drawInfo(QPainter &painter);
-    
-    // 坐标转换
-    QPointF worldToScreen(double lat, double lon);
-    
-    // 缩放因子
-    double m_scale;
+    // 界面控制相关变量
+    QUdpSocket *m_cmdSocket;
+    InterfaceMode m_currentMode;
 };
 
-#endif
-
+#endif // TRAFFICDISPLAYWIDGET_H

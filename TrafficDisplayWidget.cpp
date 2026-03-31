@@ -14,25 +14,33 @@
 #include <cmath>
 #include <QVector2D>
 #include <QVector3D>
+#include <QDebug>
+#include <QLinearGradient>
+#include <QPolygonF>
 
 // =========================================================
-// CPA Predictive Thresholds (Table 3.3)
+// CPA Predictive Thresholds (Strictly aligned with Thesis Table)
 // =========================================================
 const double METERS_PER_NM = 1852.0;
 const double FT_TO_METERS = 0.3048;
 const double KNOTS_TO_MPS = 0.514444;
 
-// Warning - Red
-const double CPA_WARN_TIME = 45.0; // seconds    
-const double CPA_WARN_DIST = 1.0 * METERS_PER_NM; 
-const double CPA_WARN_ALT  = 600.0 * FT_TO_METERS;
+// Advisory - Cyan (Tactical Horizon)
+const double CPA_ADVS_TIME = 120.0; // seconds
+const double ADVS_MAX_DIST = 15.0 * METERS_PER_NM; 
+const double ADVS_MAX_ALT  = 3000.0 * FT_TO_METERS;
 
 // Caution - Amber
 const double CPA_CAUT_TIME = 60.0; // seconds
-const double CPA_CAUT_DIST = 2.0 * METERS_PER_NM;
+const double CPA_CAUT_DIST = 3.0 * METERS_PER_NM; // 原为 2.0，依据论文更新为雷达间隔 3.0
 const double CPA_CAUT_ALT  = 800.0 * FT_TO_METERS;
 
-// Over ride - Absolute Near-Range Safety Backup
+// Warning - Red
+const double CPA_WARN_TIME = 30.0; // 原为 45.0，依据 TCAS RA 更新为 30.0
+const double CPA_WARN_DIST = 1.5 * METERS_PER_NM; // 原为 1.0，依据 LoWC 更新为 1.5
+const double CPA_WARN_ALT  = 600.0 * FT_TO_METERS;
+
+// Override - Absolute Near-Range Safety Backup (DMOD)
 const double OVERRIDE_WARN_DIST = 0.5 * METERS_PER_NM;
 const double OVERRIDE_WARN_ALT  = 300.0 * FT_TO_METERS;
 
@@ -51,12 +59,7 @@ QString getTechFont() { return "Arial"; }
 // =========================================================
 // Target Categorization
 // =========================================================
-enum TargetCategory {
-    CAT_FIXED_WING, 
-    CAT_HEAVY,      
-    CAT_ROTORCRAFT, 
-    CAT_UAV         
-};
+enum TargetCategory { CAT_FIXED_WING, CAT_HEAVY, CAT_ROTORCRAFT, CAT_UAV };
 
 TargetCategory getTargetCategory(const QString &model) {
     QString m = model.toUpper();
@@ -66,20 +69,11 @@ TargetCategory getTargetCategory(const QString &model) {
     return CAT_FIXED_WING;
 }
 
-struct RenderOrder {
-    QString key;
-    double distSq;
-};
-
-struct ThreatData {
-    QVector3D vec;
-    int level;
-    double dist;
-    QString label;
-};
+struct RenderOrder { QString key; double distSq; };
+struct ThreatData { QVector3D vec; int level; double dist; QString label; };
 
 // =========================================================
-// Dual-Pass Rendering
+// Dual-Pass Rendering Helpers
 // =========================================================
 void drawGlowLine(QPainter &painter, const QPointF &p1, const QPointF &p2, const QColor &core, const QColor &glow, int width = 2) {
     painter.setPen(QPen(glow, width + 4)); painter.drawLine(p1, p2);
@@ -97,9 +91,9 @@ void drawGlowEllipse(QPainter &painter, const QRectF &rect, const QColor &core, 
 }
 
 // =========================================================
-// 3D Tunnel Prediction Drawing (Simple Layer - Optical Advanced Quality)
+// 3D Tunnel Design 1: Glow Core (Optical Advanced)
 // =========================================================
-void drawSolidTunnel(QPainter &painter, const QPointF &startP, const QPointF &endP,
+void drawSolidTunnel_Glow(QPainter &painter, const QPointF &startP, const QPointF &endP,
     double startW, double endW, const QColor &baseColor, int animOffset) {
     QVector2D vec(endP - startP);
     if (vec.length() < 2.0) return;
@@ -112,70 +106,99 @@ void drawSolidTunnel(QPainter &painter, const QPointF &startP, const QPointF &en
 
     painter.setBrush(Qt::NoBrush); 
 
-    // 🌟 开启加法混合模式 (Additive Blending)，让它看起来像真实的光束！
-    // 注意：如果这行导致在白云背景下看不清，可以注释掉这行，保留下面的颜色优化即可
-    // painter.setCompositionMode(QPainter::CompositionMode_Plus); 
-
     for (double d = phase; d < totalLen; d += chevronSpacing) {
-    double t = d / totalLen; 
-    QPointF cPos = startP + (dir.toPointF() * d);
-    double currW = startW * (1.0 - t) + endW * t;
+        double t = d / totalLen; 
+        QPointF cPos = startP + (dir.toPointF() * d);
+        double currW = startW * (1.0 - t) + endW * t;
 
-    QPointF frontPt = cPos + (dir.toPointF() * (currW / 2.5)); 
-    QPointF leftPt  = cPos - (perp.toPointF() * currW / 2.0);  
-    QPointF rightPt = cPos + (perp.toPointF() * currW / 2.0);  
+        QPointF frontPt = cPos + (dir.toPointF() * (currW / 2.5)); 
+        QPointF leftPt  = cPos - (perp.toPointF() * currW / 2.0);  
+        QPointF rightPt = cPos + (perp.toPointF() * currW / 2.0);  
 
-    QPainterPath path;
-    path.moveTo(leftPt);
-    path.lineTo(frontPt);
-    path.lineTo(rightPt);
+        QPainterPath path;
+        path.moveTo(leftPt); path.lineTo(frontPt); path.lineTo(rightPt);
 
-    // --------------------------------------------
-    // 🌟 调色秘籍：分离“核心光”与“边缘晕”
-    // --------------------------------------------
-    int globalAlpha = std::max(0, (int)(255 * (1.0 - t))); 
+        int globalAlpha = std::max(0, (int)(255 * (1.0 - t))); 
+        QColor glowColor(255, 40, 40, globalAlpha * 0.5); 
+        QColor coreColor(255, 180, 180, globalAlpha * 0.9);
 
-    // 1. 光晕 (Glow)：颜色稍微偏暗/偏橘，极其柔和，透明度低
-    QColor glowColor(255, 40, 40); // 略微收敛的红
-    glowColor.setAlpha(globalAlpha * 0.5); // 光晕透明度压低，避免糊成一团
+        QPen glowPen(glowColor, 12);
+        glowPen.setJoinStyle(Qt::RoundJoin); glowPen.setCapStyle(Qt::RoundCap);
+        painter.setPen(glowPen); painter.drawPath(path);
 
-    // 2. 核心 (Core)：颜色极亮（近乎粉白），透明度高
-    QColor coreColor(255, 180, 180); // 泛白的核心光！这是高级感的关键！
-    coreColor.setAlpha(globalAlpha * 0.9);
-
-    // --------------------------------------------
-    // 🌟 笔触优化：使用圆角与圆帽
-    // --------------------------------------------
-    // 外层光晕画笔 (加粗到8像素，且端点和转角圆滑)
-    QPen glowPen(glowColor, 12);
-    glowPen.setJoinStyle(Qt::RoundJoin); 
-    glowPen.setCapStyle(Qt::RoundCap);
-    painter.setPen(glowPen);
-    painter.drawPath(path);
-
-    // 内层核心画笔 (2像素细白线)
-    QPen corePen(coreColor, 2);
-    corePen.setJoinStyle(Qt::RoundJoin);
-    corePen.setCapStyle(Qt::RoundCap);
-    painter.setPen(corePen);
-    painter.drawPath(path);
+        QPen corePen(coreColor, 2);
+        corePen.setJoinStyle(Qt::RoundJoin); corePen.setCapStyle(Qt::RoundCap);
+        painter.setPen(corePen); painter.drawPath(path);
     }
-
-// 恢复默认渲染模式（如果上面开启了 CompositionMode_Plus 的话必须加这行）
-// painter.setCompositionMode(QPainter::CompositionMode_SourceOver); 
 }
 
-// Compass Drawing (outside of view) 
-// Future work: Implement this function
-void draw3DThreatSphere(QPainter &painter, int screenW, int screenH, QList<ThreatData> &threats) { }
+// =========================================================
+// 3D Tunnel Design 2: Ribbed Semi-Transparent
+// =========================================================
+void drawSolidTunnel_Ribbed(QPainter &painter, const QPointF &startP, const QPointF &endP,
+                  double startW, double endW, const QColor &baseColor, int animOffset) {
+    QVector2D vec(endP - startP);
+    if (vec.length() < 2.0) return;
+    QVector2D dir = vec.normalized();
+    QVector2D perp(-dir.y(), dir.x());
+
+    QPointF sL = startP - (perp.toPointF() * startW / 2.0);
+    QPointF sR = startP + (perp.toPointF() * startW / 2.0);
+    QPointF eL = endP - (perp.toPointF() * endW / 2.0);
+    QPointF eR = endP + (perp.toPointF() * endW / 2.0);
+
+    QLinearGradient fillGrad(startP, endP);
+    QColor startFill = baseColor; startFill.setAlpha(60); 
+    QColor endFill = baseColor;   endFill.setAlpha(0);    
+    fillGrad.setColorAt(0.0, startFill); fillGrad.setColorAt(1.0, endFill);
+
+    QLinearGradient edgeGrad(startP, endP);
+    QColor startEdge = baseColor; startEdge.setAlpha(220);
+    QColor endEdge = baseColor;   endEdge.setAlpha(0);
+    edgeGrad.setColorAt(0.0, startEdge); edgeGrad.setColorAt(1.0, endEdge);
+
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(fillGrad);
+    QPolygonF bandPoly; bandPoly << sL << sR << eR << eL;
+    painter.drawPolygon(bandPoly);
+
+    painter.setPen(QPen(QBrush(edgeGrad), 4));
+    painter.drawLine(sL, eL); painter.drawLine(sR, eR);
+
+    double ribSpacing = 40.0;
+    double phase = (animOffset % 40);
+    
+    painter.setBrush(Qt::NoBrush);
+    for (double d = phase; d < vec.length(); d += ribSpacing) {
+        double t = d / vec.length();
+        QPointF cPos = startP + (dir.toPointF() * d);
+        double currW = (startW * (1.0 - t) + endW * t);
+        
+        QColor ribColor = baseColor; 
+        ribColor.setAlpha(180 * (1.0 - t)); 
+        painter.setPen(QPen(ribColor, 4));
+        
+        QPointF leftPt = cPos - (perp.toPointF() * currW / 2.0);
+        QPointF rightPt = cPos + (perp.toPointF() * currW / 2.0);
+        QPointF centerPt = cPos + (dir.toPointF() * (currW / 2.0)); 
+        
+        QPainterPath chevron;
+        chevron.moveTo(leftPt); chevron.lineTo(centerPt); chevron.lineTo(rightPt);
+        painter.drawPath(chevron);
+    }
+}
 
 const double FOV_SCALE = 1.0; 
 const double PITCH_OFFSET = 0.0;
 const double YAW_OFFSET = 0.0;
 const double ROLL_OFFSET = 0.0;
 
+// =========================================================
+// Main Widget Constructor & UDP Logic
+// =========================================================
 TrafficDisplayWidget::TrafficDisplayWidget(AircraftManager *manager, QWidget *parent)
-    : QWidget(parent), m_manager(manager) {
+    : QWidget(parent), m_manager(manager), m_currentMode(MODE_PROPOSED_B_GLOW) { // 默认启动模式为 3
+    
     setMinimumSize(1024, 768);
     setFocusPolicy(Qt::NoFocus);
 #ifdef Q_OS_WIN
@@ -193,19 +216,57 @@ TrafficDisplayWidget::TrafficDisplayWidget(AircraftManager *manager, QWidget *pa
     m_refreshTimer = new QTimer(this);
     connect(m_refreshTimer, &QTimer::timeout, this, QOverload<>::of(&QWidget::update));
     m_refreshTimer->start(20); 
+
+    // 启动 UDP 遥控器端口监听
+    m_cmdSocket = new QUdpSocket(this);
+    if (m_cmdSocket->bind(QHostAddress::Any, 8888)) {
+        qDebug() << "✅ AR UI Remote Control Active (Port 8888). Default Mode: Core Glow Tunnel (2).";
+    }
+    connect(m_cmdSocket, &QUdpSocket::readyRead, this, &TrafficDisplayWidget::onCommandReceived);
 }
 
+// 接收 UDP 遥控器指令
+void TrafficDisplayWidget::onCommandReceived() {
+    while (m_cmdSocket->hasPendingDatagrams()) {
+        QByteArray datagram;
+        datagram.resize(m_cmdSocket->pendingDatagramSize());
+        m_cmdSocket->readDatagram(datagram.data(), datagram.size());
+        QString msg = QString::fromUtf8(datagram).trimmed();
+
+        if (msg.startsWith("SYS_MODE:")) {
+            int cmd = msg.split(":")[1].toInt();
+            if (cmd == 1) {
+                m_currentMode = MODE_BASELINE_A;
+                qDebug() << ">>> Switch: MODE_BASELINE_A (2D Boxes)";
+            } else if (cmd == 2) {
+                m_currentMode = MODE_PROPOSED_B_GLOW;
+                qDebug() << ">>> Switch: MODE_PROPOSED_B_GLOW (Core Glow Tunnel)";
+            } else if (cmd == 3) {
+                m_currentMode = MODE_PROPOSED_B_RIBBED;
+                qDebug() << ">>> Switch: MODE_PROPOSED_B_RIBBED (Ribbed Tunnel)";
+            }
+            update(); // 强制画面刷新
+        }
+    }
+}
+
+// =========================================================
+// Main Rendering Loop
+// =========================================================
 void TrafficDisplayWidget::paintEvent(QPaintEvent *event) {
     Q_UNUSED(event);
     QPainter painter(this);
     painter.setRenderHint(QPainter::Antialiasing);
 
-    // Blinking Modulation Function (Eq 4.9)
     static int frameCounter = 0; frameCounter++;
     bool flashOn = (frameCounter % 20) < 12;
 
     AircraftData *own = m_manager->getOwnship();
-    if (!own) return;
+    
+    // 如果没有收到飞机数据，直接退出，保持全透明
+    if (!own || (std::abs(own->latitude) < 0.001 && std::abs(own->longitude) < 0.001)) {
+        return; 
+    }
 
     int w = width(); 
     int h = height();
@@ -242,7 +303,6 @@ void TrafficDisplayWidget::paintEvent(QPaintEvent *event) {
     for (const auto &item : renderList) {
         const AircraftData &ac = aircrafts[item.key];
         
-        // 1. Relative Normalization (Eq 4.4)
         double dN = (ac.latitude - own->latitude) * 111120.0;
         double dE = (ac.longitude - own->longitude) * 111120.0 * std::cos(own->latitude * M_PI / 180.0);
         double dD = (own->altitude - ac.altitude) * FT_TO_METERS; 
@@ -251,21 +311,17 @@ void TrafficDisplayWidget::paintEvent(QPaintEvent *event) {
         
         if (slantRange < 10.0) continue;
 
-        // Perspective Projection (Eq 4.5)
         double x3 = cThe * cPsi * dN + cThe * sPsi * dE - sThe * dD; 
         double y3 = (sPhi * sThe * cPsi - cPhi * sPsi) * dN + (sPhi * sThe * sPsi + cPhi * cPsi) * dE + sPhi * cThe * dD; 
         double z3 = (cPhi * sThe * cPsi + sPhi * sPsi) * dN + (cPhi * sThe * sPsi - sPhi * cPsi) * dE + cPhi * cThe * dD; 
 
-        // 2. Kinematic CPA Model & Relative Velocity Calculation
         double ownSpd_ms = own->speed * KNOTS_TO_MPS;
         double acSpd_ms  = ac.speed * KNOTS_TO_MPS;
-        
         double v_own_N = ownSpd_ms * std::cos(own->heading * M_PI / 180.0);
         double v_own_E = ownSpd_ms * std::sin(own->heading * M_PI / 180.0);
         double v_ac_N  = acSpd_ms * std::cos(ac.heading * M_PI / 180.0);
         double v_ac_E  = acSpd_ms * std::sin(ac.heading * M_PI / 180.0);
 
-        // Delta V components (Relative Motion Frame)
         double dv_N = v_ac_N - v_own_N;
         double dv_E = v_ac_E - v_own_E;
         double dv_sq = dv_N * dv_N + dv_E * dv_E;
@@ -280,13 +336,31 @@ void TrafficDisplayWidget::paintEvent(QPaintEvent *event) {
             d_CPA = std::sqrt(cpa_N * cpa_N + cpa_E * cpa_E);
         }
 
-        // 3. Hierarchical Alerting Logic (Algorithm 2)
         double absVertSep = std::abs(dD);
-        int alertLevel = 1; 
 
-        if (slantRange <= OVERRIDE_WARN_DIST && absVertSep <= OVERRIDE_WARN_ALT) { alertLevel = 3; }
-        else if (t_CPA > 0 && t_CPA <= CPA_WARN_TIME && d_CPA <= CPA_WARN_DIST && absVertSep <= CPA_WARN_ALT) { alertLevel = 3; }
-        else if (t_CPA > 0 && t_CPA <= CPA_CAUT_TIME && d_CPA <= CPA_CAUT_DIST && absVertSep <= CPA_CAUT_ALT) { alertLevel = 2; }
+        bool inSpatialEnvelope = (slantRange <= ADVS_MAX_DIST && absVertSep <= ADVS_MAX_ALT);
+        bool isTacticalTime = (t_CPA > 0 && t_CPA <= CPA_ADVS_TIME);
+        bool isCloseProximity = (slantRange <= 5.0 * METERS_PER_NM); // 物理上非常近，即便背向飞行也应保留作为态势感知
+
+        if (!inSpatialEnvelope || (!isTacticalTime && !isCloseProximity)) {
+            continue; // 彻底跳过该飞机的渲染，保持屏幕纯净
+        }
+
+        // 2. 警报层级判定 (严格按照论文 Table 1 自下而上覆盖)
+        int alertLevel = 1; // 经过上面的过滤，活下来的默认是 Advisory (Cyan)
+
+        // 判定 Caution (Amber)
+        if (t_CPA > 0 && t_CPA <= CPA_CAUT_TIME && d_CPA <= CPA_CAUT_DIST && absVertSep <= CPA_CAUT_ALT) { 
+            alertLevel = 2; 
+        }
+
+        // 判定 Warning (Red) 及其绝对兜底 (DMOD Override)
+        if (slantRange <= OVERRIDE_WARN_DIST && absVertSep <= OVERRIDE_WARN_ALT) { 
+            alertLevel = 3; 
+        } else if (t_CPA > 0 && t_CPA <= CPA_WARN_TIME && d_CPA <= CPA_WARN_DIST && absVertSep <= CPA_WARN_ALT) { 
+            alertLevel = 3; 
+        }
+
 
         QColor coreColor, glowColor;
         switch(alertLevel) {
@@ -310,31 +384,20 @@ void TrafficDisplayWidget::paintEvent(QPaintEvent *event) {
         } 
         else {
             // =========================================================
-            // 4. 预测轨迹渲染 (Relative Linear Extrapolation)
+            // 预测轨迹与隧道渲染 (仅非 Baseline 模式生效)
             // =========================================================
-            // 触发逻辑 Render_tunnel = (v_abs > 60 kts) AND (AlertLevel >= 2)
-            if (alertLevel >= 2 && ac.speed > 60.0 && t_CPA > 0) {
+            if (m_currentMode != MODE_BASELINE_A && alertLevel >= 2  && t_CPA > 0) {
                  double dv_len = std::sqrt(dv_sq);
-                 double dN_p = dN;
-                 double dE_p = dE;
+                 double dN_p = dN; double dE_p = dE;
                  
                  if (dv_len > 0.1) {
-                    // 修改：将预测线缩短为只显示未来 12 秒的轨迹，防止飞出屏幕
                     double maxLookAhead = 12.0; 
-                    double scaleTime = maxLookAhead; 
-                    
-                    // 如果马上就要撞了 (t_CPA < 12)，就只画到撞击点
-                    if (t_CPA > 0 && t_CPA < maxLookAhead) {
-                        scaleTime = t_CPA; 
-                    }
-                    
-                    // 保证预测终点不会穿透物理摄像机面
+                    double scaleTime = (t_CPA > 0 && t_CPA < maxLookAhead) ? t_CPA : maxLookAhead; 
                     double maxTravel = slantRange - 300.0; 
                     if (maxTravel < 0) maxTravel = 0;
                     if (scaleTime * dv_len > maxTravel) scaleTime = maxTravel / dv_len;
                     
-                    dN_p = dN + dv_N * scaleTime;
-                    dE_p = dE + dv_E * scaleTime;
+                    dN_p = dN + dv_N * scaleTime; dE_p = dE + dv_E * scaleTime;
                 }
                  
                  double x3_p = cThe * cPsi * dN_p + cThe * sPsi * dE_p - sThe * dD;
@@ -344,87 +407,70 @@ void TrafficDisplayWidget::paintEvent(QPaintEvent *event) {
                  if (x3_p > 5.0) {
                      double screenX_p = centerX + (y3_p / x3_p) * focalLengthX;
                      double screenY_p = centerY + (z3_p / x3_p) * focalLengthY; 
-                     
-                     QPointF startPoint(screenX, screenY);
-                     QPointF endPoint(screenX_p, screenY_p);
+                     QPointF startPoint(screenX, screenY); QPointF endPoint(screenX_p, screenY_p);
 
                      if (alertLevel == 3) {
-                         // Warning Stage: Volumetric 3D Tunnel
-                        // 1. Calculate the accurate screen width of the starting point
-                        double startVisualSize = 30.0 / x3 * focalLengthX;
-                        double startW = std::max(24.0, std::min(200.0, startVisualSize));
-                        
-                        // 2. Calculate the accurate screen width of the predicted end point
-                        double endVisualSize = 30.0 / x3_p * focalLengthX;
-                        double endW = std::max(24.0, std::min(200.0, endVisualSize));
+                        double startW = std::max(24.0, std::min(200.0, 30.0 / x3 * focalLengthX));
+                        double endW = std::max(24.0, std::min(200.0, 30.0 / x3_p * focalLengthX));
 
-                        // Warning Stage: Volumetric 3D Tunnel
-                        drawSolidTunnel(painter, startPoint, endPoint, 
-                                        startW, endW, coreColor, frameCounter * 3);
+                        // 根据子模式选择画 Glow 还是 Ribbed
+                        if (m_currentMode == MODE_PROPOSED_B_GLOW) {
+                            drawSolidTunnel_Glow(painter, startPoint, endPoint, startW, endW, coreColor, frameCounter * 3);
+                        } else if (m_currentMode == MODE_PROPOSED_B_RIBBED) {
+                            drawSolidTunnel_Ribbed(painter, startPoint, endPoint, startW, endW, coreColor, frameCounter * 3);
+                        }
                      } else {
-                        // Caution Stage: Glowing Dashed Line with Fading
+                        // Caution Stage
                         QLinearGradient fadeGrad(startPoint, endPoint);
-                        fadeGrad.setColorAt(0.0, coreColor);
-                        fadeGrad.setColorAt(1.0, QColor(coreColor.red(), coreColor.green(), coreColor.blue(), 0));
-
+                        fadeGrad.setColorAt(0.0, coreColor); fadeGrad.setColorAt(1.0, QColor(coreColor.red(), coreColor.green(), coreColor.blue(), 0));
                         QLinearGradient glowGrad(startPoint, endPoint);
-                        glowGrad.setColorAt(0.0, glowColor);
-                        glowGrad.setColorAt(1.0, QColor(glowColor.red(), glowColor.green(), glowColor.blue(), 0));
+                        glowGrad.setColorAt(0.0, glowColor); glowGrad.setColorAt(1.0, QColor(glowColor.red(), glowColor.green(), glowColor.blue(), 0));
 
-                        QVector<qreal> dashPattern; 
-                        dashPattern << 15 << 10; 
-
-                        QPen dashGlowPen(QBrush(glowGrad), 8);
-                        dashGlowPen.setStyle(Qt::SolidLine);  
-                        
-                        QPen dashCorePen(QBrush(fadeGrad), 3);  
-                        dashCorePen.setDashPattern(dashPattern);
-
+                        QPen dashGlowPen(QBrush(glowGrad), 8); dashGlowPen.setStyle(Qt::SolidLine);  
+                        QPen dashCorePen(QBrush(fadeGrad), 3); QVector<qreal> dashPattern; dashPattern << 15 << 10; dashCorePen.setDashPattern(dashPattern);
                         painter.setPen(dashGlowPen); painter.drawLine(startPoint, endPoint);
                         painter.setPen(dashCorePen); painter.drawLine(startPoint, endPoint);
                         
-                        // arrow tip
                         QVector2D dir(endPoint - startPoint);
                         if (dir.length() > 1.0) {
-                            dir.normalize();
-                            QVector2D perp(-dir.y(), dir.x());
-                            const double arrowLen = 22.0; const double arrowWidth = 10.0;
-                            QPointF tip = endPoint; QPointF base = tip - dir.toPointF() * arrowLen;
-                            QPointF left = base + perp.toPointF() * arrowWidth; QPointF right = base - perp.toPointF() * arrowWidth;
-                            QPainterPath arrowPath; arrowPath.moveTo(tip); arrowPath.lineTo(left); arrowPath.lineTo(right); arrowPath.closeSubpath();
-                            painter.setPen(Qt::NoPen); 
-                            
-                            QColor arrowColor = coreColor; arrowColor.setAlpha(120); // arrow semi-transparent to blend with dashed line
-                            painter.setBrush(arrowColor); 
-                            painter.drawPath(arrowPath);
+                            dir.normalize(); QVector2D perp(-dir.y(), dir.x());
+                            QPointF tip = endPoint; QPointF base = tip - dir.toPointF() * 22.0;
+                            QPainterPath arrowPath; arrowPath.moveTo(tip); arrowPath.lineTo(base + perp.toPointF() * 10.0); arrowPath.lineTo(base - perp.toPointF() * 10.0); arrowPath.closeSubpath();
+                            QColor arrowColor = coreColor; arrowColor.setAlpha(120); painter.setBrush(arrowColor); painter.setPen(Qt::NoPen); painter.drawPath(arrowPath);
                         }
                     }
                  }
             }
 
             // =========================================================
-            // 5. Categorical Geometry (Table 3.2)
+            // 分类几何框体 (Mode A 只有 2D，Mode B/C 有 3D)
             // =========================================================
             double visualSize = 30.0 / x3 * focalLengthX;
             int boxSize = std::max(24, std::min(200, (int)visualSize));
             QRectF boxRect(screenX - boxSize/2, screenY - boxSize/2, boxSize, boxSize);
             
-            if (cat == CAT_ROTORCRAFT) {
-                drawGlowEllipse(painter, boxRect, coreColor, glowColor, 2);
-            } else if (cat == CAT_UAV) {
-                QPolygonF tri;
-                tri << boxRect.topLeft() << boxRect.topRight() << QPointF(boxRect.center().x(), boxRect.bottom());
-                painter.setPen(QPen(glowColor, 6)); painter.setBrush(Qt::NoBrush); painter.drawPolygon(tri);
-                painter.setPen(QPen(coreColor, 2)); painter.drawPolygon(tri);
-            } else {
+            if (m_currentMode == MODE_BASELINE_A) {
+                // Baseline 模式永远只画基本的 2D 框
                 drawGlowRect(painter, boxRect, coreColor, glowColor, 4, 2);
-                if (cat == CAT_HEAVY) drawGlowRect(painter, boxRect.adjusted(6, 6, -6, -6), coreColor, glowColor, 2, 2);
+            } else {
+                if (cat == CAT_ROTORCRAFT) {
+                    drawGlowEllipse(painter, boxRect, coreColor, glowColor, 2);
+                } else if (cat == CAT_UAV) {
+                    QPolygonF tri; tri << boxRect.topLeft() << boxRect.topRight() << QPointF(boxRect.center().x(), boxRect.bottom());
+                    painter.setPen(QPen(glowColor, 6)); painter.setBrush(Qt::NoBrush); painter.drawPolygon(tri);
+                    painter.setPen(QPen(coreColor, 2)); painter.drawPolygon(tri);
+                } else {
+                    drawGlowRect(painter, boxRect, coreColor, glowColor, 4, 2);
+                    if (cat == CAT_HEAVY) drawGlowRect(painter, boxRect.adjusted(6, 6, -6, -6), coreColor, glowColor, 2, 2);
+                }
             }
             painter.setBrush(coreColor); painter.setPen(Qt::NoPen); painter.drawEllipse(QPointF(screenX, screenY), 2, 2);
 
-            // Alphanumeric Tags  
-            QColor textColor = coreColor; textColor.setAlpha(240); // 提高文字不透明度
-                        painter.setFont(QFont(getTechFont(), 14, QFont::Black)); 
+            // =========================================================
+            // 文本信息渲染
+            // =========================================================
+            QColor textColor = coreColor; textColor.setAlpha(240); 
+            painter.setFont(QFont(getTechFont(), 14, QFont::Black)); 
             painter.setPen(textColor);
             
             QString topText = ac.model.isEmpty() ? "TARGET" : ac.model;
@@ -436,53 +482,39 @@ void TrafficDisplayWidget::paintEvent(QPaintEvent *event) {
             
             painter.setFont(QFont(getTechFont(), 14, QFont::Bold));
             painter.drawText(QRectF(screenX-100, screenY+boxSize/2+6, 200, 20), Qt::AlignCenter, distText);
-            
-            painter.setFont(QFont(getTechFont(), 14, QFont::Bold));
             painter.drawText(QRectF(screenX-100, screenY+boxSize/2+26, 200, 20), Qt::AlignCenter, altText);
 
-            // 只有当有碰撞风险 (Warning) 且 t_CPA 有效时才显示
-            if (alertLevel == 3 && t_CPA > 0 && t_CPA < 999.0) {
+            // T-CPA 面板 (仅限非 Baseline 模式)
+            if (m_currentMode != MODE_BASELINE_A && alertLevel == 3 && t_CPA > 0 && t_CPA < 999.0) {
                 QString tcpaVal = QString("%1 s").arg((int)t_CPA);
                 QString dcpaVal = QString("%1 NM").arg(d_CPA / METERS_PER_NM, 0, 'f', 2);
 
-                // 定义网格尺寸
-                int rowH = 22;           // 每行的高度
-                int boxH = rowH * 2;     // 只有两行，总高度
-                int boxW = 120;          // 总宽度
-                int labelW = 55;         // 左侧 Label 的宽度
-                int valW = boxW - labelW;// 右侧 Value 的宽度
-                
                 int dataX = screenX + boxSize/2 + 20; 
-                int dataY = screenY - 10; // 去掉表头后，Y轴稍微往下压一点居中
+                int dataY = screenY - 10; 
 
-                // ---------------------------------------------------
-                // 2. 双色调底色渲染 (无边框色块拼贴)
-                // ---------------------------------------------------
-                painter.setPen(Qt::NoPen); // 🌟 核心：无描边！
-                
-                QColor bgLabel = QColor(0, 0, 0, 180);       // 左侧 Label 黑底
-                QColor bgValue = QColor(40, 40, 40, 120);    // 右侧 Value 灰底
+                painter.setPen(Qt::NoPen); 
+                QColor bgLabel = QColor(0, 0, 0, 180);       
+                QColor bgValue = QColor(40, 40, 40, 120);    
 
-                painter.setBrush(bgLabel); painter.drawRect(QRectF(dataX, dataY, labelW, rowH));
-                painter.setBrush(bgValue); painter.drawRect(QRectF(dataX + labelW, dataY, valW, rowH));
-                painter.setBrush(bgLabel); painter.drawRect(QRectF(dataX, dataY + rowH, labelW, rowH));
-                painter.setBrush(bgValue); painter.drawRect(QRectF(dataX + labelW, dataY + rowH, valW, rowH));
+                painter.setBrush(bgLabel); painter.drawRect(QRectF(dataX, dataY, 55, 22));
+                painter.setBrush(bgValue); painter.drawRect(QRectF(dataX + 55, dataY, 65, 22));
+                painter.setBrush(bgLabel); painter.drawRect(QRectF(dataX, dataY + 22, 55, 22));
+                painter.setBrush(bgValue); painter.drawRect(QRectF(dataX + 55, dataY + 22, 65, 22));
 
-                painter.setBrush(coreColor); // 颜色跟随当前报警级别 (红/黄)
-                painter.drawRect(QRectF(dataX, dataY, 3, boxH)); // 3个像素宽的彩色长条
+                painter.setBrush(coreColor); 
+                painter.drawRect(QRectF(dataX, dataY, 3, 44)); 
 
                 painter.setPen(coreColor);
                 painter.setFont(QFont(getTechFont(), 11, QFont::Bold));
-                
-                painter.drawText(QRectF(dataX + 8, dataY, labelW - 8, rowH), Qt::AlignLeft | Qt::AlignVCenter, "T-CPA");
-                painter.drawText(QRectF(dataX + labelW + 8, dataY, valW - 8, rowH), Qt::AlignLeft | Qt::AlignVCenter, tcpaVal);
-                painter.drawText(QRectF(dataX + 8, dataY + rowH, labelW - 8, rowH), Qt::AlignLeft | Qt::AlignVCenter, "D-CPA");
-                painter.drawText(QRectF(dataX + labelW + 8, dataY + rowH, valW - 8, rowH), Qt::AlignLeft | Qt::AlignVCenter, dcpaVal);
+                painter.drawText(QRectF(dataX + 8, dataY, 47, 22), Qt::AlignLeft | Qt::AlignVCenter, "T-CPA");
+                painter.drawText(QRectF(dataX + 63, dataY, 57, 22), Qt::AlignLeft | Qt::AlignVCenter, tcpaVal);
+                painter.drawText(QRectF(dataX + 8, dataY + 22, 47, 22), Qt::AlignLeft | Qt::AlignVCenter, "D-CPA");
+                painter.drawText(QRectF(dataX + 63, dataY + 22, 57, 22), Qt::AlignLeft | Qt::AlignVCenter, dcpaVal);
             }
         }
-
     }
 }
+
 void TrafficDisplayWidget::onRefreshTimer() { update(); }
 void TrafficDisplayWidget::onAircraftUpdated(const QString &) { update(); }
 void TrafficDisplayWidget::onOwnshipUpdated() { update(); }
