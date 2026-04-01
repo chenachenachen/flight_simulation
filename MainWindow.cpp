@@ -166,26 +166,20 @@ void MainWindow::applyWallGeometry()
 // ==========================================
 // 🎯 终极物理靶心：绘制贯穿全屏的十字
 // ==========================================
-void MainWindow::paintEvent(QPaintEvent *event) {
-    QMainWindow::paintEvent(event); // 保留透明背景
-    
+void TrafficDisplayWidget::paintEvent(QPaintEvent *event) {
     QPainter painter(this);
     painter.setRenderHint(QPainter::Antialiasing);
-    
-    // 画笔：亮绿色，3像素粗
+
+    // =========================================================
+    // 🎯 物理霸体级十字准星：无视任何数据，永远画在画布最中心！
+    // 必须放在所有 if (xxx) return; 的最前面！
+    // =========================================================
     painter.setPen(QPen(Qt::green, 3)); 
-    
-    int w = width();
-    int h = height();
-    int cx = w / 2;
-    int cy = h / 2;
-    
-    // 画横向和纵向的贯穿线
-    painter.drawLine(0, cy, w, cy);
-    painter.drawLine(cx, 0, cx, h);
-    
-    // 正中心画一个圆圈，充当瞄准器
-    painter.drawEllipse(cx - 50, cy - 50, 100, 100);
+    int cx = width() / 2;
+    int cy = height() / 2;
+    painter.drawLine(0, cy, width(), cy);           // 横贯全屏
+    painter.drawLine(cx, 0, cx, height());          // 纵贯全屏
+    painter.drawEllipse(cx - 50, cy - 50, 100, 100); // 中心圆圈
 }
 
 // ==========================================
