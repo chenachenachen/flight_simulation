@@ -77,35 +77,63 @@ MainWindow::~MainWindow() {}
 // 核心：Overlay Window 设置
 // ==========================================
 void MainWindow::setupOverlayWindow() {
-    // 1. 设置窗口标志
+    // 1. 设置标志
     Qt::WindowFlags flags = Qt::Window |
-                           Qt::FramelessWindowHint |      // 无边框
-                           Qt::WindowStaysOnTopHint |     // 始终置顶
-                           Qt::WindowDoesNotAcceptFocus;  // 不接受焦点（关键：让键盘穿透）
-    
+                           Qt::FramelessWindowHint |
+                           Qt::WindowStaysOnTopHint |
+                           Qt::WindowDoesNotAcceptFocus;
     setWindowFlags(flags);
     
-    // 2. 设置窗口属性（跨平台）
-    setAttribute(Qt::WA_TranslucentBackground, true);     // 透明背景
-    setAttribute(Qt::WA_ShowWithoutActivating, true);     // 显示但不激活
-    setAttribute(Qt::WA_NoSystemBackground, true);        // 无系统背景
-    
-    // 不获取焦点，让键盘输入穿透到下方应用
+    // 2. 设置属性
+    setAttribute(Qt::WA_TranslucentBackground, true);
+    setAttribute(Qt::WA_ShowWithoutActivating, true);
+    setAttribute(Qt::WA_NoSystemBackground, true);
     setFocusPolicy(Qt::NoFocus);
-    
-    // 关键：窗口本身不完全穿透鼠标事件，因为退出按钮需要接收鼠标事件
-    // 但通过事件过滤器实现选择性穿透
     setAttribute(Qt::WA_TransparentForMouseEvents, false);
-    
-    // 3. 隐藏状态栏（避免占用空间导致偏移）
     statusBar()->hide();
+
+    // ==========================================================
+    // 🎯 核心魔法：打破 Windows 跨屏限制
+    // ==========================================================
     
-    // 4. 获取单屏分辨率
-    m_targetWallGeometry = computeRightWallGeometry();
-    setGeometry(m_targetWallGeometry);
+    // 强制先生成底层操作系统的窗口句柄 (极其关键，否则无法跨屏)
+    this->create(); 
+
+    // 获取所有屏幕，并按 X 坐标从左到右严格排序
+    QList<QScreen *> screens = QGuiApplication::screens();
+    std::sort(screens.begin(), screens.end(), [](QScreen *a, QScreen *b) {
+        return a->geometry().x() < b->geometry().x();
+    });
+
+    // 侦察：打印当前 Windows 真实的屏幕排布
+    // (因为关闭了 Display PRO，您之前的 3840 坐标很可能已经变了！)
+    qDebug() << "========== 屏幕侦察报告 ==========";
+    for (int i = 0; i < screens.size(); ++i) {
+        qDebug() << "排序索引" << i << ":" << screens[i]->name() << "真实坐标:" << screens[i]->geometry();
+    }
+
+    // 选取目标屏幕 (假设：索引 0 是主控屏，1 是左投影，2 是中投影，3 是右投影)
+    // 我们强制抓取索引为 2 的屏幕（从左往右数第 3 块）
+    QScreen *targetScreen = screens.first(); // 兜底
+    if (screens.size() >= 3) {
+        targetScreen = screens[2]; 
+    }
     
-    // 5. 样式表确保透明
-    setStyleSheet("QMainWindow { background: transparent; }");
+    qDebug() << "🎯 强行降落目标:" << targetScreen->name() << targetScreen->geometry();
+
+    // 将底层渲染引擎死死绑定到这块屏幕上
+    if (this->windowHandle()) {
+        this->windowHandle()->setScreen(targetScreen);
+    }
+
+    // 设置几何坐标
+    m_targetWallGeometry = targetScreen->geometry();
+    this->setGeometry(m_targetWallGeometry);
+
+    // ==========================================================
+    // 🔍 显影测试液：给窗口涂上绿色半透明底和红色边框
+    // ==========================================================
+    setStyleSheet("QMainWindow { background: rgba(0, 255, 0, 60); border: 10px solid red; }");
 }
 
 void MainWindow::applyWallGeometry()
