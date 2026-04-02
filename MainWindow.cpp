@@ -18,25 +18,51 @@
 #include <QShortcut>
 #include <QEvent>
 #include <QPushButton>
-#include <QPainter>  // 🎯 新增：用于画十字准星
 
-#ifdef Q_OS_MACOS
-#include <objc/objc.h>
-#include <objc/message.h>
-#include <objc/runtime.h>
+// ★ 改动1：加入 Windows 原生 API 头文件
+#ifdef Q_OS_WIN
+#include <windows.h>
 #endif
 
 namespace {
 
 /**
- * 【绝对物理单屏模式】
- * 彻底抛弃 Windows 的主屏幕识别逻辑！
- * 强制指定 X=3840，直接盖在中间那台投影仪上！
+ * 【多屏定位】
+ * 按 X 坐标排序所有屏幕，取索引2（从左往右第3块）作为中间投影仪。
+ * 根据您的屏幕布局：
+ *   screens[0] = 主控屏   Position 0,0
+ *   screens[1] = 左投影   Position 1920,0
+ *   screens[2] = 中投影   Position 3840,0  ← 目标
+ *   screens[3] = 右投影   Position 5760,0
  */
-static QRect computeRightWallGeometry()
+static QRect computeTargetScreenGeometry()
 {
-    // 强制锁定：1920x1080，起点在 X=3840
-    return QRect(3840, 0, 1920, 1080);
+    QList<QScreen *> screens = QGuiApplication::screens();
+
+    // 按 X 坐标从左到右排序
+    std::sort(screens.begin(), screens.end(), [](QScreen *a, QScreen *b) {
+        return a->geometry().x() < b->geometry().x();
+    });
+
+    // 打印侦察报告，方便调试
+    qDebug() << "========== 屏幕侦察报告 ==========";
+    for (int i = 0; i < screens.size(); ++i) {
+        qDebug() << "排序索引" << i << ":" << screens[i]->name()
+                 << "坐标:" << screens[i]->geometry();
+    }
+
+    // 取索引2（中间投影仪）；屏幕不足时依次降级
+    QScreen *target = nullptr;
+    if (screens.size() >= 3) {
+        target = screens[2];
+    } else if (screens.size() >= 2) {
+        target = screens[1];
+    } else {
+        target = QGuiApplication::primaryScreen();
+    }
+
+    qDebug() << "🎯 目标屏幕:" << target->name() << target->geometry();
+    return target->geometry();
 }
 
 } // namespace
@@ -54,14 +80,17 @@ MainWindow::MainWindow(QWidget *parent)
     m_networkReceiver = new NetworkReceiver(m_aircraftManager, this);
     m_displayWidget   = new TrafficDisplayWidget(m_aircraftManager, this);
     
+    // 初始化退出按钮指针为nullptr，避免未初始化访问
     m_quitButton = nullptr;
 
     setupOverlayWindow();
     setupUI();
     connectSignals();
 
+    // 连接 XPlaneConnect 插件（与模拟器一致：192.168.0.22:49001）
     m_xplaneReceiver->startListening(49001);
-    m_blueSkyComm->startListening(49004);    
+    // 连接到BlueSky bridge（接收traffic数据）
+    m_blueSkyComm->startListening(49004); 
 
     m_keepOnTopTimer = new QTimer(this);
     connect(m_keepOnTopTimer, &QTimer::timeout, this, &MainWindow::onKeepOnTop);
@@ -76,85 +105,47 @@ MainWindow::~MainWindow() {}
 // 核心：Overlay Window 设置
 // ==========================================
 void MainWindow::setupOverlayWindow() {
+    // 1. 设置窗口标志 —— 只设这一次，之后绝不再调用 setWindowFlags！
     Qt::WindowFlags flags = Qt::Window |
-                           Qt::FramelessWindowHint |      
-                           Qt::WindowStaysOnTopHint |     
-                           Qt::WindowDoesNotAcceptFocus;  
-    
+                           Qt::FramelessWindowHint |      // 无边框
+                           Qt::WindowStaysOnTopHint |     // 始终置顶
+                           Qt::WindowDoesNotAcceptFocus;  // 不接受焦点（关键：让键盘穿透）
     setWindowFlags(flags);
     
-    setAttribute(Qt::WA_TranslucentBackground, true);     
-    setAttribute(Qt::WA_ShowWithoutActivating, true);     
-    setAttribute(Qt::WA_NoSystemBackground, true);        
+    // 2. 设置窗口属性（跨平台）
+    setAttribute(Qt::WA_TranslucentBackground, true);     // 透明背景
+    setAttribute(Qt::WA_ShowWithoutActivating, true);     // 显示但不激活
+    setAttribute(Qt::WA_NoSystemBackground, true);        // 无系统背景
     setFocusPolicy(Qt::NoFocus);
     setAttribute(Qt::WA_TransparentForMouseEvents, false);
     
+    // 3. 隐藏状态栏
     statusBar()->hide();
-    
-    // 获取绝对物理坐标 (3840, 0)
-    m_targetWallGeometry = computeRightWallGeometry();
-    setGeometry(m_targetWallGeometry);
-    
-    setStyleSheet("QMainWindow { background: transparent; }");
-    
-#ifdef Q_OS_MACOS
-    QTimer::singleShot(100, this, [this]() {
-        WId winId = this->winId();
-        if (winId) {
-            void* nsView = reinterpret_cast<void*>(winId);
-            SEL windowSel = sel_registerName("window");
-            typedef void* (*GetWindowFunc)(void*, SEL);
-            void* nsWindow = ((GetWindowFunc)objc_msgSend)(nsView, windowSel);
-            
-            if (nsWindow) {
-                SEL respondsToSel = sel_registerName("respondsToSelector:");
-                typedef bool (*RespondsToSelectorFunc)(void*, SEL, SEL);
-                
-                SEL setCanBecomeKeySel = sel_registerName("setCanBecomeKey:");
-                if (respondsToSel && setCanBecomeKeySel) {
-                    bool responds = ((RespondsToSelectorFunc)objc_msgSend)(nsWindow, respondsToSel, setCanBecomeKeySel);
-                    if (responds) {
-                        typedef void (*SetCanBecomeKeyFunc)(void*, SEL, bool);
-                        ((SetCanBecomeKeyFunc)objc_msgSend)(nsWindow, setCanBecomeKeySel, false);
-                    }
-                }
-                
-                SEL setCanBecomeMainSel = sel_registerName("setCanBecomeMain:");
-                if (respondsToSel && setCanBecomeMainSel) {
-                    bool responds = ((RespondsToSelectorFunc)objc_msgSend)(nsWindow, respondsToSel, setCanBecomeMainSel);
-                    if (responds) {
-                        typedef void (*SetCanBecomeMainFunc)(void*, SEL, bool);
-                        ((SetCanBecomeMainFunc)objc_msgSend)(nsWindow, setCanBecomeMainSel, false);
-                    }
-                }
-                
-                SEL orderFrontSel = sel_registerName("orderFront:");
-                if (orderFrontSel) {
-                    typedef void (*OrderFrontFunc)(void*, SEL, void*);
-                    ((OrderFrontFunc)objc_msgSend)(nsWindow, orderFrontSel, nullptr);
-                }
-                
-                SEL setHidesOnDeactivateSel = sel_registerName("setHidesOnDeactivate:");
-                if (setHidesOnDeactivateSel) {
-                    typedef void (*SetHidesOnDeactivateFunc)(void*, SEL, bool);
-                    ((SetHidesOnDeactivateFunc)objc_msgSend)(nsWindow, setHidesOnDeactivateSel, false);
-                }
-                
-                SEL setLevelSel = sel_registerName("setLevel:");
-                if (setLevelSel) {
-                    typedef void (*SetLevelFunc)(void*, SEL, long);
-                    ((SetLevelFunc)objc_msgSend)(nsWindow, setLevelSel, 2002);
-                }
-                
-                SEL setCollectionBehaviorSel = sel_registerName("setCollectionBehavior:");
-                if (setCollectionBehaviorSel) {
-                    typedef void (*SetCollectionBehaviorFunc)(void*, SEL, unsigned long);
-                    ((SetCollectionBehaviorFunc)objc_msgSend)(nsWindow, setCollectionBehaviorSel, 17);
-                }
-            }
-        }
+
+    // ★ 改动2：强制创建底层句柄，再绑定目标屏幕，确保坐标正确
+    this->create();
+
+    // 计算目标屏幕几何（按X坐标排序取索引2）
+    m_targetWallGeometry = computeTargetScreenGeometry();
+
+    // 将底层渲染引擎绑定到目标屏幕
+    QList<QScreen *> screens = QGuiApplication::screens();
+    std::sort(screens.begin(), screens.end(), [](QScreen *a, QScreen *b) {
+        return a->geometry().x() < b->geometry().x();
     });
-#endif
+    QScreen *targetScreen = (screens.size() >= 3) ? screens[2]
+                          : (screens.size() >= 2) ? screens[1]
+                          : QGuiApplication::primaryScreen();
+
+    if (this->windowHandle()) {
+        this->windowHandle()->setScreen(targetScreen);
+    }
+
+    // 设置几何坐标（在 show() 之前完成）
+    this->setGeometry(m_targetWallGeometry);
+
+    // 4. 样式表确保透明
+    setStyleSheet("QMainWindow { background: transparent; }");
 }
 
 void MainWindow::applyWallGeometry()
@@ -164,58 +155,37 @@ void MainWindow::applyWallGeometry()
 }
 
 // ==========================================
-// 🎯 终极物理靶心：绘制贯穿全屏的十字
-// ==========================================
-void TrafficDisplayWidget::paintEvent(QPaintEvent *event) {
-    QPainter painter(this);
-    painter.setRenderHint(QPainter::Antialiasing);
-
-    // =========================================================
-    // 🎯 物理霸体级十字准星：无视任何数据，永远画在画布最中心！
-    // 必须放在所有 if (xxx) return; 的最前面！
-    // =========================================================
-    painter.setPen(QPen(Qt::green, 3)); 
-    int cx = width() / 2;
-    int cy = height() / 2;
-    painter.drawLine(0, cy, width(), cy);           // 横贯全屏
-    painter.drawLine(cx, 0, cx, height());          // 纵贯全屏
-    painter.drawEllipse(cx - 50, cy - 50, 100, 100); // 中心圆圈
-}
-
-// ==========================================
 // 置顶维护
 // ==========================================
 void MainWindow::ensureOnTop() {
     if (!isVisible()) {
         show();
     }
-    
-#ifdef Q_OS_MACOS
-    WId winId = this->winId();
-    if (winId) {
-        void* nsView = reinterpret_cast<void*>(winId);
-        SEL windowSel = sel_registerName("window");
-        typedef void* (*GetWindowFunc)(void*, SEL);
-        void* nsWindow = ((GetWindowFunc)objc_msgSend)(nsView, windowSel);
-        if (nsWindow) {
-            SEL orderFrontSel = sel_registerName("orderFront:");
-            if (orderFrontSel) {
-                typedef void (*OrderFrontFunc)(void*, SEL, void*);
-                ((OrderFrontFunc)objc_msgSend)(nsWindow, orderFrontSel, nullptr);
-            }
-        }
+
+    // ★ 改动3：用 Windows 原生 SetWindowPos 置顶+定位，完全不动 setWindowFlags
+    // 这样不会触发窗口重建，坐标永远不会丢失
+#ifdef Q_OS_WIN
+    HWND hwnd = reinterpret_cast<HWND>(this->winId());
+    ::SetWindowPos(
+        hwnd,
+        HWND_TOPMOST,
+        m_targetWallGeometry.x(),
+        m_targetWallGeometry.y(),
+        m_targetWallGeometry.width(),
+        m_targetWallGeometry.height(),
+        SWP_SHOWWINDOW | SWP_NOACTIVATE   // 显示但不抢焦点
+    );
+#else
+    // 非 Windows 平台保留原逻辑
+    Qt::WindowFlags f = windowFlags();
+    if (!(f & Qt::WindowStaysOnTopHint)) {
+        f |= Qt::WindowStaysOnTopHint;
+        setWindowFlags(f);
+        show();
+        applyWallGeometry();
     }
 #endif
-    
-    Qt::WindowFlags flags = windowFlags();
-    if (!(flags & Qt::WindowStaysOnTopHint)) {
-        flags |= Qt::WindowStaysOnTopHint;
-        setWindowFlags(flags);
-        show();
-        applyWallGeometry(); 
-    }
 }
-
 
 // ==========================================
 // UI
@@ -225,11 +195,16 @@ void MainWindow::setupUI() {
 
     QWidget *centralWidget = new QWidget(this);
     centralWidget->setAttribute(Qt::WA_TranslucentBackground, true);
+    // 注意：不在centralWidget级别设置WA_TransparentForMouseEvents
+    // 因为退出按钮需要接收鼠标事件，通过事件过滤器实现选择性穿透
     centralWidget->setFocusPolicy(Qt::NoFocus);  
     centralWidget->setStyleSheet("background: transparent;");
     setCentralWidget(centralWidget);
     
+    // 为centralWidget安装事件过滤器，实现选择性鼠标穿透
     centralWidget->installEventFilter(this);
+    
+    // 关键：为MainWindow本身也安装事件过滤器，确保键盘事件被拦截
     installEventFilter(this);
 
     QVBoxLayout *mainLayout = new QVBoxLayout(centralWidget);
@@ -240,6 +215,7 @@ void MainWindow::setupUI() {
     QLabel *xplaneStatus   = new QLabel("XP: --", this);
     QLabel *blueskyStatus  = new QLabel("BS: UDP", this);
     
+    // 设置标签为鼠标穿透，不拦截事件
     xplaneStatus->setAttribute(Qt::WA_TransparentForMouseEvents, true);
     xplaneStatus->setFocusPolicy(Qt::NoFocus);
     blueskyStatus->setAttribute(Qt::WA_TransparentForMouseEvents, true);
@@ -344,19 +320,19 @@ void MainWindow::onXPlaneDataReceived() {
 // ==========================================
 void MainWindow::showEvent(QShowEvent *event) {
     QMainWindow::showEvent(event);
+    applyWallGeometry();
+#ifdef Q_OS_WIN
+    // 部分 Windows 驱动/多 GPU 在首次 show 后才给出最终虚拟桌面坐标
+    QTimer::singleShot(0, this, [this]() { applyWallGeometry(); });
+#endif
+    ensureOnTop();
     
-    // 🎯 核心魔法：延迟传送！
-    // 强行把刚生成的窗口踹到 X=3840 的屏幕上，打破 Windows 的限制
-    QTimer::singleShot(100, this, [this]() {
-        this->setGeometry(3840, 0, 1920, 1080);
-    });
-
-    QTimer::singleShot(500, this, [this]() {
-        this->setGeometry(3840, 0, 1920, 1080);
+    QTimer::singleShot(50, this, [this]() {
+        if (!isVisible()) {
+            show();
+        }
         ensureOnTop();
     });
-
-    ensureOnTop();
 }
 
 void MainWindow::closeEvent(QCloseEvent *event) {
@@ -367,40 +343,14 @@ void MainWindow::requestQuit() {
     QApplication::quit();
 }
 
+// ★ 改动4：hideEvent 删掉强制 show 的 timer
+// 原来的强制 show 会和 X-Plane 全屏抢焦点，造成闪烁和位置错乱
+// onKeepOnTop() 每 500ms 已经在做同样的保活工作，不需要重复
 void MainWindow::hideEvent(QHideEvent *event) {
-    QTimer::singleShot(10, this, [this]() {
-        if (!isVisible()) {
-            show();
-            ensureOnTop();
-        }
-    });
     QMainWindow::hideEvent(event);
 }
 
 void MainWindow::changeEvent(QEvent *event) {
-    if (event->type() == QEvent::WindowStateChange || 
-        event->type() == QEvent::ActivationChange) {
-        
-        if (isActiveWindow()) {
-#ifdef Q_OS_MACOS
-            WId winId = this->winId();
-            if (winId) {
-                void* nsView = reinterpret_cast<void*>(winId);
-                SEL windowSel = sel_registerName("window");
-                typedef void* (*GetWindowFunc)(void*, SEL);
-                void* nsWindow = ((GetWindowFunc)objc_msgSend)(nsView, windowSel);
-                if (nsWindow) {
-                    SEL resignKeyWindowSel = sel_registerName("resignKeyWindow");
-                    if (resignKeyWindowSel) {
-                        typedef void (*ResignKeyWindowFunc)(void*, SEL);
-                        ((ResignKeyWindowFunc)objc_msgSend)(nsWindow, resignKeyWindowSel);
-                    }
-                }
-            }
-#endif
-        }
-    }
-    
     QMainWindow::changeEvent(event);
 }
 
@@ -411,7 +361,7 @@ bool MainWindow::eventFilter(QObject *obj, QEvent *event) {
     }
     
     if (event->type() == QEvent::ShortcutOverride) {
-        return false;  
+        return false; 
     }
     
     QWidget *cw = centralWidget();
@@ -424,7 +374,7 @@ bool MainWindow::eventFilter(QObject *obj, QEvent *event) {
         QMouseEvent *mouseEvent = static_cast<QMouseEvent*>(event);
         
         if (m_quitButton && m_quitButton->isVisible() && m_quitButton->parentWidget()) {
-            QPoint widgetPos = mouseEvent->pos();  
+            QPoint widgetPos = mouseEvent->pos(); 
             QPoint buttonPos = m_quitButton->pos();  
             QRect buttonRect(buttonPos, m_quitButton->size());
             
@@ -459,6 +409,7 @@ bool MainWindow::event(QEvent *event) {
         event->type() == QEvent::Shortcut) {
         return false;  
     }
+    
     return QMainWindow::event(event);
 }
 
